@@ -1,0 +1,1187 @@
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+using System.Text;
+using System.Text.Json;
+using Vanara.PInvoke;
+using static Vanara.PInvoke.Ole32;
+
+namespace ClipboardOleDemo;
+
+
+internal static class Program
+{
+    [STAThread]
+    private static void Main()
+    {
+        OleInitialize(IntPtr.Zero).ThrowIfFailed();
+
+        try
+        {
+            ApplicationConfiguration.Initialize();
+            Application.Run(new MainForm());
+        }
+        finally
+        {
+            OleUninitialize();
+        }
+    }
+}
+
+public sealed class MainForm : Form
+{
+    private readonly Button _btnFormats;
+    private readonly Button _btnRaw;
+    private readonly Button _btnDrawable;
+    private readonly Button _btnSave;
+    private readonly Button _btnLoad;
+    private readonly TextBox _txtInfo;
+    private readonly Panel _panelPreview;
+
+    private ClipboardDrawableOleObject? _drawable;
+
+    public MainForm()
+    {
+        Text = "Vanara Clipboard OLE Persist Demo";
+        Width = 1280;
+        Height = 820;
+        StartPosition = FormStartPosition.CenterScreen;
+
+        _btnFormats = new Button
+        {
+            Text = "枚举格式",
+            Left = 12,
+            Top = 12,
+            Width = 110,
+            Height = 25
+        };
+        _btnFormats.Click += (_, __) => DumpFormats();
+
+        _btnRaw = new Button
+        {
+            Text = "读取原始 OLE",
+            Left = 132,
+            Top = 12,
+            Width = 130,
+            Height = 25
+        };
+        _btnRaw.Click += (_, __) => ReadRaw();
+
+        _btnDrawable = new Button
+        {
+            Text = "从剪贴板创建",
+            Left = 272,
+            Top = 12,
+            Width = 140,
+            Height = 25
+        };
+        _btnDrawable.Click += (_, __) => CreateDrawableFromClipboard();
+
+        _btnSave = new Button
+        {
+            Text = "保存到文件",
+            Left = 12,
+            Top = 40,
+            Width = 120,
+            Height = 25
+        };
+        _btnSave.Click += (_, __) => SaveToFile();
+
+        _btnLoad = new Button
+        {
+            Text = "从文件打开",
+            Left = 142,
+            Top = 40,
+            Width = 120,
+            Height = 25
+        };
+        _btnLoad.Click += (_, __) => LoadFromFile();
+
+        _txtInfo = new TextBox
+        {
+            Left = 12,
+            Top = 80,
+            Width = 560,
+            Height = 690,
+            Multiline = true,
+            ScrollBars = ScrollBars.Both,
+            WordWrap = false,
+            Font = new Font("Consolas", 10)
+        };
+
+        _panelPreview = new Panel
+        {
+            Left = 585,
+            Top = 12,
+            Width = 670,
+            Height = 758,
+            BorderStyle = BorderStyle.FixedSingle,
+            BackColor = Color.White
+        };
+        _panelPreview.Paint += PanelPreview_Paint;
+        _panelPreview.MouseDoubleClick += PanelPreview_DoubleClick;
+
+        Controls.Add(_btnFormats);
+        Controls.Add(_btnRaw);
+        Controls.Add(_btnDrawable);
+        Controls.Add(_btnSave);
+        Controls.Add(_btnLoad);
+        Controls.Add(_txtInfo);
+        Controls.Add(_panelPreview);
+    }
+
+    private void DumpFormats()
+    {
+        try
+        {
+            List<ClipboardFormatInfo> formats = VanaraClipboardOle.GetClipboardFormats();
+            var sb = new StringBuilder();
+            sb.AppendLine("Clipboard formats");
+            sb.AppendLine(new string('-', 100));
+
+            foreach (ClipboardFormatInfo f in formats)
+            {
+                sb.AppendLine($"cf={f.FormatId,-6} name={f.FormatName,-30} tymed={f.Tymed,-20} aspect={f.Aspect}");
+            }
+
+            _txtInfo.Text = sb.ToString();
+        }
+        catch (Exception ex)
+        {
+            _txtInfo.Text = ex.ToString();
+        }
+    }
+
+    private void ReadRaw()
+    {
+        try
+        {
+            if (!VanaraClipboardOle.TryGetPreferredRawOleDataFromClipboard(out ClipboardOleRawData? raw))
+            {
+                _txtInfo.Text = "没有拿到 Embedded Object / Embed Source 原始数据。";
+                return;
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine("Raw OLE data");
+            sb.AppendLine(new string('-', 100));
+            sb.AppendLine($"FormatId   : {raw.FormatId}");
+            sb.AppendLine($"FormatName : {raw.FormatName}");
+            sb.AppendLine($"Tymed      : {raw.Tymed}");
+            sb.AppendLine($"Bytes      : {raw.RawBytes.Length}");
+            sb.AppendLine();
+            sb.AppendLine("Head (max 128 bytes):");
+            sb.AppendLine(BitConverter.ToString(raw.RawBytes, 0, Math.Min(raw.RawBytes.Length, 128)));
+
+            _txtInfo.Text = sb.ToString();
+        }
+        catch (Exception ex)
+        {
+            _txtInfo.Text = ex.ToString();
+        }
+    }
+
+    private void CreateDrawableFromClipboard()
+    {
+        try
+        {
+            _drawable?.Dispose();
+            _drawable = VanaraClipboardOle.CreateDrawableObjectFromClipboard(_panelPreview);
+            if (_drawable is null)
+                ShowDrawableInfo("从剪贴板创建失败");
+            else
+                ShowDrawableInfo("从剪贴板创建成功");
+        }
+        catch (Exception ex)
+        {
+            _txtInfo.Text = ex.ToString();
+        }
+    }
+
+    private void SaveToFile()
+    {
+        try
+        {
+            if (_drawable == null)
+            {
+                MessageBox.Show(this, "当前还没有对象可保存。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            using var dialog = new SaveFileDialog
+            {
+                Title = "保存 OLE 对象",
+                Filter = "OLE Persist Package (*.olepkg.json)|*.olepkg.json|All files (*.*)|*.*",
+                FileName = "clipboard-object.olepkg.json"
+            };
+
+            if (dialog.ShowDialog(this) != DialogResult.OK)
+                return;
+
+            PersistedOlePackage package = _drawable.ExportPackage();
+            string json = JsonSerializer.Serialize(package);
+            File.WriteAllText(dialog.FileName, json, Encoding.UTF8);
+
+            ShowDrawableInfo($"已保存到文件: {dialog.FileName}");
+        }
+        catch (Exception ex)
+        {
+            _txtInfo.Text = ex.ToString();
+        }
+    }
+
+    private void LoadFromFile()
+    {
+        try
+        {
+            using var dialog = new OpenFileDialog
+            {
+                Title = "打开 OLE 对象",
+                Filter = "OLE Persist Package (*.olepkg.json)|*.olepkg.json|All files (*.*)|*.*"
+            };
+
+            if (dialog.ShowDialog(this) != DialogResult.OK)
+                return;
+
+            string json = File.ReadAllText(dialog.FileName, Encoding.UTF8);
+            PersistedOlePackage? package = JsonSerializer.Deserialize<PersistedOlePackage>(json);
+            if (package == null)
+                throw new InvalidOperationException("文件反序列化失败。");
+
+            _drawable?.Dispose();
+            _drawable = VanaraClipboardOle.OpenFromPersistedPackage(package, _panelPreview);
+            ShowDrawableInfo($"已从文件恢复: {dialog.FileName}");
+        }
+        catch (Exception ex)
+        {
+            _txtInfo.Text = ex.ToString();
+        }
+    }
+
+    private void ShowDrawableInfo(string title)
+    {
+        if (_drawable == null)
+            return;
+
+        PersistedOlePackage package = _drawable.ExportPackage();
+
+        var sb = new StringBuilder();
+        sb.AppendLine(title);
+        sb.AppendLine(new string('-', 100));
+        sb.AppendLine($"StorageBytes    : {package.StorageBytes.Length}");
+        sb.AppendLine($"Version         : {package.Version}");
+        sb.AppendLine($"DisplayName     : {package.DisplayName}");
+        sb.AppendLine($"SavedAtUtc      : {package.SavedAtUtc:O}");
+        sb.AppendLine();
+        sb.AppendLine("双击右侧预览区打开原生编辑器。关闭编辑器后，如果 OLE Server 调用了 SaveObject，修改会保存回当前 OLE 存储。再次双击应打开最新内容。保存到文件后，可在后续会话中重新恢复。");
+
+        _txtInfo.Text = sb.ToString();
+        _panelPreview.Invalidate();
+    }
+
+    private void PanelPreview_DoubleClick(object? sender, MouseEventArgs e)
+    {
+        if (_drawable == null)
+            return;
+
+        try
+        {
+            _drawable.OpenEditor(
+                Handle,
+                containerAppName: "WinFormsApp4",
+                documentName: "Clipboard OLE Object");
+        }
+        catch (Exception ex)
+        {
+            _txtInfo.Text = ex.ToString();
+        }
+    }
+
+    private void PanelPreview_Paint(object? sender, PaintEventArgs e)
+    {
+        e.Graphics.Clear(Color.White);
+
+        if (_drawable == null)
+        {
+            using var pen = new Pen(Color.Silver);
+            e.Graphics.DrawRectangle(
+                pen,
+                10,
+                10,
+                _panelPreview.ClientSize.Width - 20,
+                _panelPreview.ClientSize.Height - 20);
+
+            using var brush = new SolidBrush(Color.Gray);
+            e.Graphics.DrawString("这里显示 OleDraw 结果", Font, brush, 20, 20);
+            return;
+        }
+
+        var outerBox = new Rectangle(
+            20,
+            20,
+            _panelPreview.ClientSize.Width - 40,
+            _panelPreview.ClientSize.Height - 40);
+
+        Rectangle drawRect = outerBox;
+        Size? naturalSize = _drawable.GetNaturalPixelSize(e.Graphics.DpiX, e.Graphics.DpiY);
+        if (naturalSize.HasValue)
+        {
+            //drawRect = FitRectKeepAspect(naturalSize.Value, outerBox);
+            drawRect.Width = naturalSize.Value.Width;
+            drawRect.Height = naturalSize.Value.Height;
+        }
+        else
+        {
+            return;
+        }
+
+        _drawable.Draw(e.Graphics, drawRect);
+    }
+
+    private static Rectangle FitRectKeepAspect(Size content, Rectangle box)
+    {
+        if (content.Width <= 0 || content.Height <= 0 || box.Width <= 0 || box.Height <= 0)
+            return box;
+
+        double scaleX = (double)box.Width / content.Width;
+        double scaleY = (double)box.Height / content.Height;
+        double scale = Math.Min(scaleX, scaleY);
+
+        int w = Math.Max(1, (int)Math.Round(content.Width * scale));
+        int h = Math.Max(1, (int)Math.Round(content.Height * scale));
+        int x = box.X + (box.Width - w) / 2;
+        int y = box.Y + (box.Height - h) / 2;
+
+        return new Rectangle(x, y, w, h);
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        _drawable?.Dispose();
+        base.OnFormClosed(e);
+    }
+}
+
+public sealed class ClipboardFormatInfo
+{
+    public ushort FormatId { get; init; }
+    public string FormatName { get; init; } = "";
+    public TYMED Tymed { get; init; }
+    public DVASPECT Aspect { get; init; }
+}
+
+public sealed class ClipboardOleRawData
+{
+    public ushort FormatId { get; init; }
+    public string FormatName { get; init; } = "";
+    public TYMED Tymed { get; init; }
+    public byte[] RawBytes { get; init; } = Array.Empty<byte>();
+}
+
+public sealed class PersistedOlePackage
+{
+    public int Version { get; init; } = 1;
+    public string DisplayName { get; init; } = "Clipboard OLE Object";
+    public DateTime SavedAtUtc { get; init; } = DateTime.UtcNow;
+    public byte[] StorageBytes { get; init; } = Array.Empty<byte>();
+}
+
+public sealed class ClipboardDrawableOleObject : IDisposable
+{
+    private object? _oleObject;
+    private IStorage? _storage;
+    private ILockBytes? _lockBytes;
+    private readonly Control _hostControl;
+
+    private OleClientSiteBridge? _clientSite; //可有可无！！！
+    private OleAdviseSinkBridge? _adviseSink;
+    private uint _oleAdviseCookie;
+    private bool _viewAdviseAttached;
+    private bool _isSaving;
+
+    private const int OLEIVERB_PRIMARY = 0;
+    private const int OLEIVERB_SHOW = -1;
+    private const int OLEIVERB_OPEN = -2;
+
+    internal ClipboardDrawableOleObject(object oleObject, IStorage storage, ILockBytes lockBytes, Control hostControl)
+    {
+        _oleObject = oleObject;
+        _storage = storage;
+        _lockBytes = lockBytes;
+        _hostControl = hostControl ?? throw new ArgumentNullException(nameof(hostControl));
+
+        AttachCallbacks();
+    }
+
+
+    public PersistedOlePackage ExportPackage(string displayName = "Clipboard OLE Object")
+    {
+        SaveToBackingStorage();
+
+        return new PersistedOlePackage
+        {
+            Version = 1,
+            DisplayName = displayName,
+            SavedAtUtc = DateTime.UtcNow,
+            StorageBytes = GetBackingStorageBytes()
+        };
+    }
+
+    public void OpenEditor(
+        IntPtr hwndParent,
+        string containerAppName = "WinFormsApp4",
+        string? documentName = "Embedded Object")
+    {
+        if (_oleObject == null)
+            throw new ObjectDisposedException(nameof(ClipboardDrawableOleObject));
+        if (_clientSite == null)
+            throw new ObjectDisposedException(nameof(ClipboardDrawableOleObject));
+
+        if (_oleObject is not IOleObject ole)
+            throw new InvalidOperationException("当前对象不支持 IOleObject。");
+
+
+        ole.SetHostNames(containerAppName, documentName);
+
+        var rc = new RECT();
+        HRESULT hr = ole.DoVerb(
+            OLEIVERB_OPEN,
+            default,
+            _clientSite,
+            0,
+            hwndParent,
+            rc);
+
+        if (hr == HRESULT.OLEOBJ_S_INVALIDVERB || hr == HRESULT.E_NOTIMPL)
+        {
+            hr = ole.DoVerb(
+                OLEIVERB_PRIMARY,
+                default,
+                _clientSite,
+                0,
+                hwndParent,
+                rc);
+        }
+
+        if (hr == HRESULT.OLEOBJ_S_INVALIDVERB || hr == HRESULT.E_NOTIMPL)
+        {
+            hr = ole.DoVerb(
+                OLEIVERB_SHOW,
+                default,
+                _clientSite,
+                0,
+                hwndParent,
+                rc);
+        }
+
+        hr.ThrowIfFailed();
+    }
+
+    public Size? GetNaturalPixelSize(float dpiX, float dpiY)
+    {
+        if (_oleObject == null)
+            return null;
+
+        if (_oleObject is not IOleObject ole)
+            return null;
+
+        HRESULT hr = ole.GetExtent(DVASPECT.DVASPECT_CONTENT, out SIZE sz);
+        if (hr != 0 || sz.cx <= 0 || sz.cy <= 0)
+            return null;
+
+        int pxW = (int)Math.Round(sz.cx * dpiX / 2540.0);
+        int pxH = (int)Math.Round(sz.cy * dpiY / 2540.0);
+
+        if (pxW <= 0 || pxH <= 0)
+            return null;
+
+        return new Size(pxW, pxH);
+    }
+
+    public void Draw(Graphics g, Rectangle bounds)
+    {
+        if (_oleObject == null)
+            throw new ObjectDisposedException(nameof(ClipboardDrawableOleObject));
+
+        IntPtr hdc = g.GetHdc();
+        try
+        {
+            var rc = new RECT(bounds.Left, bounds.Top, bounds.Right, bounds.Bottom);
+            //var rc = new RECT(-200, -200, bounds.Right, bounds.Bottom);
+            OleDraw(_oleObject, DVASPECT.DVASPECT_CONTENT, hdc, rc).ThrowIfFailed();
+        }
+        finally
+        {
+            g.ReleaseHdc(hdc);
+        }
+    }
+
+    public byte[] GetBackingStorageBytes()
+    {
+        if (_lockBytes == null)
+            throw new ObjectDisposedException(nameof(ClipboardDrawableOleObject));
+        if (_storage != null)
+            _storage.Commit(0);
+
+        GetHGlobalFromILockBytes(_lockBytes, out var hGlobal).ThrowIfFailed();
+        return VanaraClipboardOle.HGlobalToBytes(hGlobal);
+    }
+
+    internal void NotifyHostChanged()
+    {
+        if (_hostControl.IsDisposed)
+            return;
+
+        void RefreshCore()
+        {
+            if (_hostControl.IsDisposed)
+                return;
+
+            _hostControl.Invalidate();
+            _hostControl.Update();
+        }
+
+        if (_hostControl.InvokeRequired)
+            _hostControl.BeginInvoke((Action)RefreshCore);
+        else
+            RefreshCore();
+    }
+
+    internal HRESULT SaveForClientSite()
+    {
+        try
+        {
+            SaveToBackingStorage();
+            return HRESULT.S_OK;
+        }
+        catch (Exception ex)
+        {
+            return HRESULT.E_FAIL;
+        }
+    }
+
+    private void SaveToBackingStorage()
+    {
+        if (_isSaving)
+            return;
+
+        if (_oleObject == null)
+            throw new ObjectDisposedException(nameof(ClipboardDrawableOleObject));
+        if (_storage == null)
+            throw new ObjectDisposedException(nameof(ClipboardDrawableOleObject));
+
+        if (_oleObject is not IPersistStorage persist)
+            return;
+
+        _isSaving = true;
+        try
+        {
+            HRESULT dirtyHr = persist.IsDirty();
+            //確定ではない、これで判断できない
+            if (dirtyHr == HRESULT.S_FALSE)
+                return;
+
+            dirtyHr.ThrowIfFailed();
+
+            //OleSave(persist, _storage, true).ThrowIfFailed();
+            OleSave(persist, _storage, true);
+            persist.SaveCompleted(null);
+            _storage.Commit(0);
+
+            NotifyHostChanged();
+        }
+        finally
+        {
+            _isSaving = false;
+        }
+    }
+
+    private void AttachCallbacks()
+    {
+        if (_oleObject == null)
+            return;
+        if (_clientSite is null)
+            _clientSite = new OleClientSiteBridge(this);
+        if (_adviseSink is null)
+            _adviseSink = new OleAdviseSinkBridge(this);
+
+        if (_oleObject is IOleObject ole)
+        {
+            ole.SetClientSite(_clientSite).ThrowIfFailed();
+
+            HRESULT hrAdvise = ole.Advise(_adviseSink, out _oleAdviseCookie);
+            if (hrAdvise.Failed)
+                _oleAdviseCookie = 0;
+        }
+
+        if (_oleObject is IViewObject view)
+        {
+            HRESULT hr = view.SetAdvise(
+                DVASPECT.DVASPECT_CONTENT,
+                ADVF.ADVF_PRIMEFIRST,
+                _adviseSink);
+
+            _viewAdviseAttached = hr.Succeeded;
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_oleObject is IOleObject ole && _oleAdviseCookie != 0)
+        {
+            try { ole.Unadvise(_oleAdviseCookie); } catch { }
+            _oleAdviseCookie = 0;
+        }
+
+        if (_oleObject is IViewObject view && _viewAdviseAttached)
+        {
+            try { view.SetAdvise(DVASPECT.DVASPECT_CONTENT, 0, null); } catch { }
+            _viewAdviseAttached = false;
+        }
+
+
+        if (_adviseSink != null && Marshal.IsComObject(_adviseSink))
+        {
+            Marshal.ReleaseComObject(_adviseSink);
+            _adviseSink = null;
+        }
+        if (_clientSite != null && Marshal.IsComObject(_clientSite))
+        {
+            Marshal.ReleaseComObject(_clientSite);
+            _clientSite = null;
+        }
+        if (_oleObject != null && Marshal.IsComObject(_oleObject))
+        {
+            if (_oleObject is IOleObject oleForClose)
+            {
+                try { oleForClose.Close(OLECLOSE.OLECLOSE_NOSAVE); } catch { }
+                try { oleForClose.SetClientSite(null); } catch { }
+            }
+
+            Marshal.ReleaseComObject(_oleObject);
+            _oleObject = null;
+        }
+
+        if (_storage != null && Marshal.IsComObject(_storage))
+        {
+            Marshal.ReleaseComObject(_storage);
+            _storage = null;
+        }
+
+        if (_lockBytes != null && Marshal.IsComObject(_lockBytes))
+        {
+            Marshal.ReleaseComObject(_lockBytes);
+            _lockBytes = null;
+        }
+    }
+}
+
+[ComVisible(true)]
+[ClassInterface(ClassInterfaceType.None)]
+public sealed class OleClientSiteBridge : IOleClientSite
+{
+    private readonly ClipboardDrawableOleObject _owner;
+
+    public OleClientSiteBridge(ClipboardDrawableOleObject owner)
+    {
+        _owner = owner;
+    }
+
+    public HRESULT SaveObject() => _owner.SaveForClientSite();
+
+    public HRESULT ShowObject()
+    {
+        _owner.NotifyHostChanged();
+        return HRESULT.S_OK;
+    }
+
+    public HRESULT OnShowWindow(bool fShow)
+    {
+        _owner.NotifyHostChanged();
+        return HRESULT.S_OK;
+    }
+
+    public HRESULT RequestNewObjectLayout()
+    {
+        _owner.NotifyHostChanged();
+        return HRESULT.S_OK;
+    }
+
+    public HRESULT GetMoniker(OLEGETMONIKER dwAssign, OLEWHICHMK dwWhichMoniker, out IMoniker? ppmk)
+    {
+        ppmk = null;
+        return HRESULT.E_NOTIMPL;
+    }
+
+    public HRESULT GetContainer(out IOleContainer? ppContainer)
+    {
+        ppContainer = null;
+        return HRESULT.E_NOINTERFACE;
+    }
+}
+
+[ComVisible(true)]
+[ClassInterface(ClassInterfaceType.None)]
+public sealed class OleAdviseSinkBridge : IAdviseSink
+{
+    private readonly ClipboardDrawableOleObject _owner;
+
+    public OleAdviseSinkBridge(ClipboardDrawableOleObject owner)
+    {
+        _owner = owner;
+    }
+
+    public void OnDataChange(ref FORMATETC pFormatetc, ref STGMEDIUM pStgmed)
+    {
+        _owner.NotifyHostChanged();
+    }
+
+    public void OnSave()
+    {
+        ////!!!!!!!
+        _owner.NotifyHostChanged();
+    }
+
+    public void OnClose()
+    {
+        ////!!!!!!!
+        _owner.NotifyHostChanged();
+        ////!!!!!!!
+        _owner.SaveForClientSite();
+    }
+
+    public void OnRename(IMoniker moniker)
+    {
+        _owner.NotifyHostChanged();
+    }
+
+    public void OnViewChange(int aspect, int index)
+    {
+        ////!!!!!!!
+        _owner.NotifyHostChanged();
+    }
+}
+
+public static class VanaraClipboardOle
+{
+    private const int OLE_S_STATIC = 0x00040001;
+    private const uint GMEM_MOVEABLE = 0x0002;
+    private const uint GMEM_ZEROINIT = 0x0040;
+    private const uint GHND = GMEM_MOVEABLE | GMEM_ZEROINIT;
+
+    private static readonly Guid IID_IUnknown =
+        new("00000000-0000-0000-C000-000000000046");
+
+    public static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        WriteIndented = true
+    };
+
+    public static List<ClipboardFormatInfo> GetClipboardFormats()
+    {
+        OleGetClipboard(out System.Runtime.InteropServices.ComTypes.IDataObject dataObj).ThrowIfFailed();
+
+        try
+        {
+            var list = new List<ClipboardFormatInfo>();
+            IEnumFORMATETC enumFmt = dataObj.EnumFormatEtc(DATADIR.DATADIR_GET);
+
+            var arr = new FORMATETC[1];
+            var fetched = new int[1];
+
+            while (enumFmt.Next(1, arr, fetched) == 0 && fetched[0] == 1)
+            {
+                ushort cf = unchecked((ushort)arr[0].cfFormat);
+                list.Add(new ClipboardFormatInfo
+                {
+                    FormatId = cf,
+                    FormatName = GetClipboardFormatDisplayName(cf),
+                    Tymed = arr[0].tymed,
+                    Aspect = arr[0].dwAspect
+                });
+            }
+
+            return list;
+        }
+        finally
+        {
+            ReleaseComObjectSafe(dataObj);
+        }
+    }
+
+    public static bool TryGetPreferredRawOleDataFromClipboard(out ClipboardOleRawData raw)
+    {
+        raw = null!;
+
+        OleGetClipboard(out System.Runtime.InteropServices.ComTypes.IDataObject dataObj).ThrowIfFailed();
+        try
+        {
+            var cfEmbeddedObject = User32.RegisterClipboardFormat("Embedded Object");
+            var cfEmbedSource = User32.RegisterClipboardFormat("Embed Source");
+
+            if (TryReadRawFormat(dataObj, (ushort)cfEmbeddedObject, "Embedded Object", out raw))
+                return true;
+
+            if (TryReadRawFormat(dataObj, (ushort)cfEmbedSource, "Embed Source", out raw))
+                return true;
+
+            return false;
+        }
+        finally
+        {
+            ReleaseComObjectSafe(dataObj);
+        }
+    }
+
+    public static ClipboardDrawableOleObject? CreateDrawableObjectFromClipboard(Control hostControl)
+    {
+        if (hostControl == null)
+            throw new ArgumentNullException(nameof(hostControl));
+
+        OleGetClipboard(out System.Runtime.InteropServices.ComTypes.IDataObject dataObj).ThrowIfFailed();
+
+        try
+        {
+            HRESULT qhr = OleQueryCreateFromData(dataObj);
+            if ((int)qhr == OLE_S_STATIC)
+            {
+                return null;
+            }
+            else
+            {
+                qhr.ThrowIfFailed();
+            }
+
+            CreateILockBytesOnHGlobal(IntPtr.Zero, true, out ILockBytes lockBytes).ThrowIfFailed();
+
+            IStorage? storage = null;
+            object? oleObj = null;
+
+            try
+            {
+                StgCreateDocfileOnILockBytes(
+                    lockBytes,
+                    STGM.STGM_CREATE | STGM.STGM_READWRITE | STGM.STGM_SHARE_EXCLUSIVE | STGM.STGM_TRANSACTED,
+                    0,
+                    out storage).ThrowIfFailed();
+
+                var renderFmt = new FORMATETC
+                {
+                    cfFormat = 0,
+                    ptd = IntPtr.Zero,
+                    dwAspect = DVASPECT.DVASPECT_CONTENT,
+                    lindex = -1,
+                    tymed = TYMED.TYMED_NULL
+                };
+
+
+                OleCreateFromData(
+                    dataObj,
+                    in IID_IUnknown,
+                    OLERENDER.OLERENDER_DRAW,
+                    in renderFmt,
+                    null,
+                    storage,
+                    out oleObj).ThrowIfFailed();
+
+
+                storage.Commit(0);
+                return new ClipboardDrawableOleObject(oleObj, storage, lockBytes, hostControl);
+            }
+            catch
+            {
+                if (oleObj != null && Marshal.IsComObject(oleObj))
+                    Marshal.ReleaseComObject(oleObj);
+
+                if (storage != null && Marshal.IsComObject(storage))
+                    Marshal.ReleaseComObject(storage);
+
+                if (lockBytes != null && Marshal.IsComObject(lockBytes))
+                    Marshal.ReleaseComObject(lockBytes);
+
+                throw;
+            }
+        }
+        finally
+        {
+            ReleaseComObjectSafe(dataObj);
+        }
+    }
+
+    public static ClipboardDrawableOleObject OpenFromPersistedPackage(PersistedOlePackage package, Control hostControl)
+    {
+        if (package == null)
+            throw new ArgumentNullException(nameof(package));
+        if (hostControl == null)
+            throw new ArgumentNullException(nameof(hostControl));
+        if (package.StorageBytes == null || package.StorageBytes.Length == 0)
+            throw new ArgumentException("StorageBytes 为空。", nameof(package));
+
+        IntPtr hGlobal = IntPtr.Zero;
+        ILockBytes? lockBytes = null;
+        IStorage? storage = null;
+        object? oleObj = null;
+
+        try
+        {
+            hGlobal = BytesToHGlobal(package.StorageBytes);
+
+            CreateILockBytesOnHGlobal(hGlobal, true, out lockBytes).ThrowIfFailed();
+            hGlobal = IntPtr.Zero;
+
+            StgOpenStorageOnILockBytes(
+                lockBytes,
+                null,
+                STGM.STGM_READWRITE | STGM.STGM_SHARE_EXCLUSIVE | STGM.STGM_TRANSACTED,
+                null,
+                0,
+                out storage).ThrowIfFailed();
+
+            OleLoad(
+                storage,
+                in IID_IUnknown,
+                null,
+                out oleObj).ThrowIfFailed();
+
+            return new ClipboardDrawableOleObject(oleObj, storage, lockBytes, hostControl);
+        }
+        catch
+        {
+            if (oleObj != null && Marshal.IsComObject(oleObj))
+                Marshal.ReleaseComObject(oleObj);
+
+            if (storage != null && Marshal.IsComObject(storage))
+                Marshal.ReleaseComObject(storage);
+
+            if (lockBytes != null && Marshal.IsComObject(lockBytes))
+                Marshal.ReleaseComObject(lockBytes);
+
+            if (hGlobal != IntPtr.Zero)
+                Kernel32.GlobalFree(hGlobal);
+
+            throw;
+        }
+    }
+
+    private static bool TryReadRawFormat(
+        System.Runtime.InteropServices.ComTypes.IDataObject dataObj,
+        ushort cfFormat,
+        string formatName,
+        out ClipboardOleRawData raw)
+    {
+        raw = null!;
+
+        foreach (TYMED tymed in new[] { TYMED.TYMED_HGLOBAL, TYMED.TYMED_ISTREAM, TYMED.TYMED_ISTORAGE })
+        {
+            var fmt = new FORMATETC
+            {
+                cfFormat = unchecked((short)cfFormat),
+                dwAspect = DVASPECT.DVASPECT_CONTENT,
+                lindex = -1,
+                ptd = IntPtr.Zero,
+                tymed = tymed
+            };
+
+            int q = dataObj.QueryGetData(ref fmt);
+            if (q != 0)
+                continue;
+
+            dataObj.GetData(ref fmt, out STGMEDIUM stg);
+            try
+            {
+                switch (stg.tymed)
+                {
+                    case TYMED.TYMED_HGLOBAL:
+                        raw = new ClipboardOleRawData
+                        {
+                            FormatId = cfFormat,
+                            FormatName = formatName,
+                            Tymed = stg.tymed,
+                            RawBytes = HGlobalToBytes(stg.unionmember)
+                        };
+                        return true;
+
+                    case TYMED.TYMED_ISTREAM:
+                        {
+                            var stream = (IStream)Marshal.GetObjectForIUnknown(stg.unionmember);
+                            try
+                            {
+                                raw = new ClipboardOleRawData
+                                {
+                                    FormatId = cfFormat,
+                                    FormatName = formatName,
+                                    Tymed = stg.tymed,
+                                    RawBytes = ReadAllBytesAndRewind(stream)
+                                };
+                                return true;
+                            }
+                            finally
+                            {
+                                ReleaseComObjectSafe(stream);
+                            }
+                        }
+
+                    case TYMED.TYMED_ISTORAGE:
+                        {
+                            var storage = (IStorage)Marshal.GetObjectForIUnknown(stg.unionmember);
+                            try
+                            {
+                                raw = new ClipboardOleRawData
+                                {
+                                    FormatId = cfFormat,
+                                    FormatName = formatName,
+                                    Tymed = stg.tymed,
+                                    RawBytes = StorageToBytes(storage)
+                                };
+                                return true;
+                            }
+                            finally
+                            {
+                                ReleaseComObjectSafe(storage);
+                            }
+                        }
+                }
+            }
+            finally
+            {
+                ReleaseStgMedium(stg);
+            }
+        }
+
+        return false;
+    }
+
+    private static byte[] StorageToBytes(IStorage sourceStorage)
+    {
+        CreateILockBytesOnHGlobal(IntPtr.Zero, true, out ILockBytes lockBytes).ThrowIfFailed();
+
+        IStorage? destStorage = null;
+        try
+        {
+            StgCreateDocfileOnILockBytes(
+                lockBytes,
+                STGM.STGM_CREATE | STGM.STGM_READWRITE | STGM.STGM_SHARE_EXCLUSIVE | STGM.STGM_TRANSACTED,
+                0,
+                out destStorage).ThrowIfFailed();
+
+            sourceStorage.CopyTo(0, null, IntPtr.Zero, destStorage);
+            destStorage.Commit(0);
+
+            GetHGlobalFromILockBytes(lockBytes, out var hGlobal).ThrowIfFailed();
+            return HGlobalToBytes(hGlobal);
+        }
+        finally
+        {
+            ReleaseComObjectSafe(destStorage);
+            ReleaseComObjectSafe(lockBytes);
+        }
+    }
+
+    private static byte[] ReadAllBytesAndRewind(IStream stream)
+    {
+        using var ms = new MemoryStream();
+        byte[] buffer = new byte[8192];
+        IntPtr pcbRead = Marshal.AllocCoTaskMem(sizeof(int));
+
+        try
+        {
+            while (true)
+            {
+                stream.Read(buffer, buffer.Length, pcbRead);
+                int read = Marshal.ReadInt32(pcbRead);
+                if (read <= 0)
+                    break;
+
+                ms.Write(buffer, 0, read);
+            }
+
+            stream.Seek(0, 0, IntPtr.Zero);
+            return ms.ToArray();
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(pcbRead);
+        }
+    }
+
+    internal static byte[] HGlobalToBytes(IntPtr hglobal)
+    {
+        int size = checked((int)Kernel32.GlobalSize(hglobal));
+        IntPtr ptr = Kernel32.GlobalLock(hglobal);
+        if (ptr == IntPtr.Zero)
+            throw new InvalidOperationException("GlobalLock failed.");
+
+        try
+        {
+            var bytes = new byte[size];
+            Marshal.Copy(ptr, bytes, 0, size);
+            return bytes;
+        }
+        finally
+        {
+            Kernel32.GlobalUnlock(hglobal);
+        }
+    }
+
+    private static IntPtr BytesToHGlobal(byte[] bytes)
+    {
+        if (bytes == null)
+            throw new ArgumentNullException(nameof(bytes));
+
+        var hGlobal = Kernel32.GlobalAlloc(Kernel32.GMEM.GHND, (UIntPtr)bytes.Length);
+        if (hGlobal == IntPtr.Zero)
+            throw new OutOfMemoryException("GlobalAlloc failed.");
+
+        IntPtr ptr = Kernel32.GlobalLock(hGlobal);
+        if (ptr == IntPtr.Zero)
+        {
+            Kernel32.GlobalFree(hGlobal);
+            throw new InvalidOperationException("GlobalLock failed.");
+        }
+
+        try
+        {
+            Marshal.Copy(bytes, 0, ptr, bytes.Length);
+        }
+        finally
+        {
+            Kernel32.GlobalUnlock(hGlobal);
+        }
+
+        return hGlobal.DangerousGetHandle();
+    }
+
+    private static string GetClipboardFormatDisplayName(ushort cf)
+    {
+        string? std = GetStandardClipboardFormatName(cf);
+        if (std != null)
+            return std;
+
+        var sb = new StringBuilder(256);
+        int len = User32.GetClipboardFormatName(cf, sb, sb.Capacity);
+        if (len > 0)
+            return sb.ToString();
+
+        return $"Format_{cf}";
+    }
+
+    private static string? GetStandardClipboardFormatName(ushort cf) => cf switch
+    {
+        1 => "CF_TEXT",
+        2 => "CF_BITMAP",
+        3 => "CF_METAFILEPICT",
+        8 => "CF_DIB",
+        13 => "CF_UNICODETEXT",
+        14 => "CF_ENHMETAFILE",
+        15 => "CF_HDROP",
+        17 => "CF_DIBV5",
+        _ => null
+    };
+
+    private static void ReleaseComObjectSafe(object? obj)
+    {
+        if (obj != null && Marshal.IsComObject(obj))
+            Marshal.ReleaseComObject(obj);
+    }
+
+
+}
