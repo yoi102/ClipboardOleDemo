@@ -1,12 +1,16 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using System.Text.Json;
+using System.Windows.Forms;
 using Vanara.PInvoke;
 using static Vanara.PInvoke.Ole32;
 
-namespace ClipboardOleDemo;
-
+namespace WinFormsApp4;
 
 internal static class Program
 {
@@ -58,17 +62,17 @@ public sealed class MainForm : Form
 
         _btnRaw = new Button
         {
-            Text = "读取原始 OLE",
+            Text = "读取 Descriptor",
             Left = 132,
             Top = 12,
             Width = 130,
             Height = 25
         };
-        _btnRaw.Click += (_, __) => ReadRaw();
+        _btnRaw.Click += (_, __) => ReadObjectDescriptor();
 
         _btnDrawable = new Button
         {
-            Text = "从剪贴板创建",
+            Text = "从剪切板创建",
             Left = 272,
             Top = 12,
             Width = 140,
@@ -151,26 +155,29 @@ public sealed class MainForm : Form
         }
     }
 
-    private void ReadRaw()
+    private void ReadObjectDescriptor()
     {
         try
         {
-            if (!VanaraClipboardOle.TryGetPreferredRawOleDataFromClipboard(out ClipboardOleRawData? raw))
+            if (!VanaraClipboardOle.TryGetObjectDescriptorFromClipboard(out ClipboardOleDescriptorInfo? desc))
             {
-                _txtInfo.Text = "没有拿到 Embedded Object / Embed Source 原始数据。";
+                _txtInfo.Text = "剪切板中没有 Object Descriptor，无法识别 OLE 类型。";
                 return;
             }
 
             var sb = new StringBuilder();
-            sb.AppendLine("Raw OLE data");
+            sb.AppendLine("Object Descriptor");
             sb.AppendLine(new string('-', 100));
-            sb.AppendLine($"FormatId   : {raw.FormatId}");
-            sb.AppendLine($"FormatName : {raw.FormatName}");
-            sb.AppendLine($"Tymed      : {raw.Tymed}");
-            sb.AppendLine($"Bytes      : {raw.RawBytes.Length}");
-            sb.AppendLine();
-            sb.AppendLine("Head (max 128 bytes):");
-            sb.AppendLine(BitConverter.ToString(raw.RawBytes, 0, Math.Min(raw.RawBytes.Length, 128)));
+            sb.AppendLine($"FormatId         : {desc.FormatId}");
+            sb.AppendLine($"FormatName       : {desc.FormatName}");
+            sb.AppendLine($"Tymed            : {desc.Tymed}");
+            sb.AppendLine($"OleKind          : {desc.OleKind}");
+            sb.AppendLine($"ClassId          : {desc.ClassId}");
+            sb.AppendLine($"ProgId           : {desc.ProgId}");
+            sb.AppendLine($"FullUserTypeName : {desc.FullUserTypeName}");
+            sb.AppendLine($"SourceOfCopy     : {desc.SourceOfCopy}");
+            sb.AppendLine($"DrawAspect       : {desc.DrawAspect}");
+            sb.AppendLine($"Status           : 0x{desc.Status:X8}");
 
             _txtInfo.Text = sb.ToString();
         }
@@ -184,12 +191,53 @@ public sealed class MainForm : Form
     {
         try
         {
+            ClipboardOleDescriptorInfo? desc = null;
+            VanaraClipboardOle.TryGetObjectDescriptorFromClipboard(out desc);
+
             _drawable?.Dispose();
             _drawable = VanaraClipboardOle.CreateDrawableObjectFromClipboard(_panelPreview);
+
+            var sb = new StringBuilder();
+
             if (_drawable is null)
-                ShowDrawableInfo("从剪贴板创建失败");
-            else
-                ShowDrawableInfo("从剪贴板创建成功");
+            {
+                sb.AppendLine("从剪切板创建失败");
+                if (desc != null)
+                {
+                    sb.AppendLine(new string('-', 100));
+                    sb.AppendLine($"类型     : {desc.OleKind}");
+                    sb.AppendLine($"ProgId   : {desc.ProgId}");
+                    sb.AppendLine($"UserType : {desc.FullUserTypeName}");
+                    sb.AppendLine($"Source   : {desc.SourceOfCopy}");
+                }
+
+                _txtInfo.Text = sb.ToString();
+                return;
+            }
+
+            sb.AppendLine("从剪切板创建成功");
+            sb.AppendLine(new string('-', 100));
+
+            if (desc != null)
+            {
+                sb.AppendLine($"类型     : {desc.OleKind}");
+                sb.AppendLine($"ProgId   : {desc.ProgId}");
+                sb.AppendLine($"UserType : {desc.FullUserTypeName}");
+                sb.AppendLine($"Source   : {desc.SourceOfCopy}");
+                sb.AppendLine($"CLSID    : {desc.ClassId}");
+                sb.AppendLine();
+            }
+
+            PersistedOlePackage package = _drawable.ExportPackage();
+            sb.AppendLine($"StorageBytes    : {package.StorageBytes.Length}");
+            sb.AppendLine($"Version         : {package.Version}");
+            sb.AppendLine($"DisplayName     : {package.DisplayName}");
+            sb.AppendLine($"SavedAtUtc      : {package.SavedAtUtc:O}");
+            sb.AppendLine();
+            sb.AppendLine("双击右侧预览区打开原生编辑器。关闭编辑器后，如果 OLE Server 调用了 SaveObject，修改会保存回当前 OLE 存储。再次双击应打开最新内容。保存到文件后，可在后续会话中重新恢复。");
+
+            _txtInfo.Text = sb.ToString();
+            _panelPreview.Invalidate();
         }
         catch (Exception ex)
         {
@@ -288,7 +336,7 @@ public sealed class MainForm : Form
             _drawable.OpenEditor(
                 Handle,
                 containerAppName: "WinFormsApp4",
-                documentName: "Clipboard OLE Object");
+                documentName: "OLE Object");
         }
         catch (Exception ex)
         {
@@ -377,6 +425,23 @@ public sealed class ClipboardOleRawData
     public byte[] RawBytes { get; init; } = Array.Empty<byte>();
 }
 
+public sealed class ClipboardOleDescriptorInfo
+{
+    public ushort FormatId { get; init; }
+    public string FormatName { get; init; } = "";
+    public TYMED Tymed { get; init; }
+
+    public Guid ClassId { get; init; }
+    public string ProgId { get; init; } = "";
+    public string FullUserTypeName { get; init; } = "";
+    public string SourceOfCopy { get; init; } = "";
+
+    public uint DrawAspect { get; init; }
+    public uint Status { get; init; }
+
+    public string OleKind { get; init; } = "Unknown";
+}
+
 public sealed class PersistedOlePackage
 {
     public int Version { get; init; } = 1;
@@ -392,7 +457,7 @@ public sealed class ClipboardDrawableOleObject : IDisposable
     private ILockBytes? _lockBytes;
     private readonly Control _hostControl;
 
-    private OleClientSiteBridge? _clientSite; //可有可无！！！
+    private OleClientSiteBridge? _clientSite;
     private OleAdviseSinkBridge? _adviseSink;
     private uint _oleAdviseCookie;
     private bool _viewAdviseAttached;
@@ -411,7 +476,6 @@ public sealed class ClipboardDrawableOleObject : IDisposable
 
         AttachCallbacks();
     }
-
 
     public PersistedOlePackage ExportPackage(string displayName = "Clipboard OLE Object")
     {
@@ -438,7 +502,6 @@ public sealed class ClipboardDrawableOleObject : IDisposable
 
         if (_oleObject is not IOleObject ole)
             throw new InvalidOperationException("当前对象不支持 IOleObject。");
-
 
         ole.SetHostNames(containerAppName, documentName);
 
@@ -506,7 +569,6 @@ public sealed class ClipboardDrawableOleObject : IDisposable
         try
         {
             var rc = new RECT(bounds.Left, bounds.Top, bounds.Right, bounds.Bottom);
-            //var rc = new RECT(-200, -200, bounds.Right, bounds.Bottom);
             OleDraw(_oleObject, DVASPECT.DVASPECT_CONTENT, hdc, rc).ThrowIfFailed();
         }
         finally
@@ -553,7 +615,7 @@ public sealed class ClipboardDrawableOleObject : IDisposable
             SaveToBackingStorage();
             return HRESULT.S_OK;
         }
-        catch (Exception ex)
+        catch
         {
             return HRESULT.E_FAIL;
         }
@@ -576,14 +638,12 @@ public sealed class ClipboardDrawableOleObject : IDisposable
         try
         {
             HRESULT dirtyHr = persist.IsDirty();
-            //確定ではない、これで判断できない
             if (dirtyHr == HRESULT.S_FALSE)
                 return;
 
             dirtyHr.ThrowIfFailed();
 
-            //OleSave(persist, _storage, true).ThrowIfFailed();
-            OleSave(persist, _storage, true);
+            OleSave(persist, _storage, true).ThrowIfFailed();
             persist.SaveCompleted(null);
             _storage.Commit(0);
 
@@ -637,7 +697,6 @@ public sealed class ClipboardDrawableOleObject : IDisposable
             try { view.SetAdvise(DVASPECT.DVASPECT_CONTENT, 0, null); } catch { }
             _viewAdviseAttached = false;
         }
-
 
         if (_adviseSink != null && Marshal.IsComObject(_adviseSink))
         {
@@ -737,15 +796,12 @@ public sealed class OleAdviseSinkBridge : IAdviseSink
 
     public void OnSave()
     {
-        ////!!!!!!!
         _owner.NotifyHostChanged();
     }
 
     public void OnClose()
     {
-        ////!!!!!!!
         _owner.NotifyHostChanged();
-        ////!!!!!!!
         _owner.SaveForClientSite();
     }
 
@@ -756,7 +812,6 @@ public sealed class OleAdviseSinkBridge : IAdviseSink
 
     public void OnViewChange(int aspect, int index)
     {
-        ////!!!!!!!
         _owner.NotifyHostChanged();
     }
 }
@@ -770,6 +825,36 @@ public static class VanaraClipboardOle
 
     private static readonly Guid IID_IUnknown =
         new("00000000-0000-0000-C000-000000000046");
+
+    [DllImport("ole32.dll", CharSet = CharSet.Unicode)]
+    private static extern int ProgIDFromCLSID(ref Guid clsid, out IntPtr lplpszProgID);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SIZEL_NATIVE
+    {
+        public int cx;
+        public int cy;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINTL_NATIVE
+    {
+        public int x;
+        public int y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct OBJECTDESCRIPTOR_NATIVE
+    {
+        public uint cbSize;
+        public Guid clsid;
+        public uint dwDrawAspect;
+        public SIZEL_NATIVE sizel;
+        public POINTL_NATIVE pointl;
+        public uint dwStatus;
+        public uint dwFullUserTypeName;
+        public uint dwSrcOfCopy;
+    }
 
     public static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -801,6 +886,27 @@ public static class VanaraClipboardOle
             }
 
             return list;
+        }
+        finally
+        {
+            ReleaseComObjectSafe(dataObj);
+        }
+    }
+
+    public static bool TryGetObjectDescriptorFromClipboard(out ClipboardOleDescriptorInfo info)
+    {
+        info = null!;
+
+        OleGetClipboard(out System.Runtime.InteropServices.ComTypes.IDataObject dataObj).ThrowIfFailed();
+        try
+        {
+            var cfObjectDescriptor = User32.RegisterClipboardFormat("Object Descriptor");
+
+            if (!TryReadRawFormat(dataObj, (ushort)cfObjectDescriptor, "Object Descriptor", out ClipboardOleRawData raw))
+                return false;
+
+            info = ParseObjectDescriptor(raw);
+            return true;
         }
         finally
         {
@@ -873,7 +979,6 @@ public static class VanaraClipboardOle
                     tymed = TYMED.TYMED_NULL
                 };
 
-
                 OleCreateFromData(
                     dataObj,
                     in IID_IUnknown,
@@ -882,7 +987,6 @@ public static class VanaraClipboardOle
                     null,
                     storage,
                     out oleObj).ThrowIfFailed();
-
 
                 storage.Commit(0);
                 return new ClipboardDrawableOleObject(oleObj, storage, lockBytes, hostControl);
@@ -959,6 +1063,46 @@ public static class VanaraClipboardOle
                 Kernel32.GlobalFree(hGlobal);
 
             throw;
+        }
+    }
+
+    private static ClipboardOleDescriptorInfo ParseObjectDescriptor(ClipboardOleRawData raw)
+    {
+        if (raw.RawBytes == null || raw.RawBytes.Length == 0)
+            throw new InvalidOperationException("Object Descriptor 数据为空。");
+
+        int size = Marshal.SizeOf<OBJECTDESCRIPTOR_NATIVE>();
+        if (raw.RawBytes.Length < size)
+            throw new InvalidOperationException("Object Descriptor 数据长度不足。");
+
+        var handle = GCHandle.Alloc(raw.RawBytes, GCHandleType.Pinned);
+        try
+        {
+            IntPtr ptr = handle.AddrOfPinnedObject();
+            OBJECTDESCRIPTOR_NATIVE native = Marshal.PtrToStructure<OBJECTDESCRIPTOR_NATIVE>(ptr);
+
+            string fullUserTypeName = ReadDescriptorString(raw.RawBytes, (int)native.dwFullUserTypeName);
+            string srcOfCopy = ReadDescriptorString(raw.RawBytes, (int)native.dwSrcOfCopy);
+            string progId = TryGetProgId(native.clsid);
+            string oleKind = ClassifyOleKind(progId, fullUserTypeName, srcOfCopy);
+
+            return new ClipboardOleDescriptorInfo
+            {
+                FormatId = raw.FormatId,
+                FormatName = raw.FormatName,
+                Tymed = raw.Tymed,
+                ClassId = native.clsid,
+                ProgId = progId,
+                FullUserTypeName = fullUserTypeName,
+                SourceOfCopy = srcOfCopy,
+                DrawAspect = native.dwDrawAspect,
+                Status = native.dwStatus,
+                OleKind = oleKind
+            };
+        }
+        finally
+        {
+            handle.Free();
         }
     }
 
@@ -1103,6 +1247,134 @@ public static class VanaraClipboardOle
         }
     }
 
+    private static string ReadDescriptorString(byte[] bytes, int offset)
+    {
+        if (offset <= 0 || offset >= bytes.Length)
+            return "";
+
+        string ansi = ReadNullTerminatedAnsi(bytes, offset);
+        string unicode = ReadNullTerminatedUnicode(bytes, offset);
+
+        if (string.IsNullOrWhiteSpace(unicode))
+            return ansi;
+
+        if (string.IsNullOrWhiteSpace(ansi))
+            return unicode;
+
+        int ansiScore = ScoreString(ansi);
+        int unicodeScore = ScoreString(unicode);
+
+        if (unicodeScore > ansiScore)
+            return unicode;
+
+        if (ansiScore > unicodeScore)
+            return ansi;
+
+        return unicode.Length >= ansi.Length ? unicode : ansi;
+    }
+
+    private static string ReadNullTerminatedAnsi(byte[] bytes, int offset)
+    {
+        int end = offset;
+        while (end < bytes.Length && bytes[end] != 0)
+            end++;
+
+        int len = end - offset;
+        if (len <= 0)
+            return "";
+
+        return Encoding.Default.GetString(bytes, offset, len).Trim();
+    }
+
+    private static string ReadNullTerminatedUnicode(byte[] bytes, int offset)
+    {
+        int end = offset;
+
+        while (end + 1 < bytes.Length)
+        {
+            if (bytes[end] == 0 && bytes[end + 1] == 0)
+                break;
+
+            end += 2;
+        }
+
+        int len = end - offset;
+        if (len <= 0 || (len % 2) != 0)
+            return "";
+
+        return Encoding.Unicode.GetString(bytes, offset, len).Trim();
+    }
+
+    private static int ScoreString(string s)
+    {
+        if (string.IsNullOrEmpty(s))
+            return 0;
+
+        int score = 0;
+        foreach (char ch in s)
+        {
+            if (!char.IsControl(ch))
+                score += 2;
+
+            if (char.IsLetterOrDigit(ch) || char.IsWhiteSpace(ch) || ch is '.' or '\\' or ':' or '_' or '-' or '(' or ')' or '/')
+                score += 2;
+
+            if (ch == '\uFFFD')
+                score -= 6;
+        }
+
+        return score;
+    }
+
+    private static string TryGetProgId(Guid clsid)
+    {
+        IntPtr p = IntPtr.Zero;
+        try
+        {
+            int hr = ProgIDFromCLSID(ref clsid, out p);
+            if (hr != 0 || p == IntPtr.Zero)
+                return "";
+
+            return Marshal.PtrToStringUni(p) ?? "";
+        }
+        finally
+        {
+            if (p != IntPtr.Zero)
+                Marshal.FreeCoTaskMem(p);
+        }
+    }
+
+    private static string ClassifyOleKind(string progId, string fullUserTypeName, string srcOfCopy)
+    {
+        string s = $"{progId}|{fullUserTypeName}|{srcOfCopy}".ToLowerInvariant();
+
+        if (s.Contains("excel"))
+            return "Excel";
+
+        if (s.Contains("word"))
+            return "Word";
+
+        if (s.Contains("powerpoint") || s.Contains("ppt"))
+            return "PowerPoint";
+
+        if (s.Contains("visio"))
+            return "Visio";
+
+        if (s.Contains("acrobat") || s.Contains("pdf"))
+            return "PDF";
+
+        if (s.Contains("package"))
+            return "Package";
+
+        if (s.Contains("paint") || s.Contains("bitmap") || s.Contains("image") || s.Contains("png") || s.Contains("jpg") || s.Contains("jpeg"))
+            return "Image";
+
+        if (s.Contains("static"))
+            return "Static";
+
+        return "Other/Unknown";
+    }
+
     internal static byte[] HGlobalToBytes(IntPtr hglobal)
     {
         int size = checked((int)Kernel32.GlobalSize(hglobal));
@@ -1124,8 +1396,7 @@ public static class VanaraClipboardOle
 
     private static IntPtr BytesToHGlobal(byte[] bytes)
     {
-        if (bytes == null)
-            throw new ArgumentNullException(nameof(bytes));
+        ArgumentNullException.ThrowIfNull(bytes);
 
         var hGlobal = Kernel32.GlobalAlloc(Kernel32.GMEM.GHND, (UIntPtr)bytes.Length);
         if (hGlobal == IntPtr.Zero)
@@ -1182,6 +1453,4 @@ public static class VanaraClipboardOle
         if (obj != null && Marshal.IsComObject(obj))
             Marshal.ReleaseComObject(obj);
     }
-
-
 }
