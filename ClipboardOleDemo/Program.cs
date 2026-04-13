@@ -124,6 +124,8 @@ public sealed class MainForm : Form
         _panelPreview.Paint += PanelPreview_Paint;
         _panelPreview.MouseDoubleClick += PanelPreview_DoubleClick;
 
+        this.Resize += MainForm_Resize;
+
         Controls.Add(_btnFormats);
         Controls.Add(_btnRaw);
         Controls.Add(_btnDrawable);
@@ -131,6 +133,12 @@ public sealed class MainForm : Form
         Controls.Add(_btnLoad);
         Controls.Add(_txtInfo);
         Controls.Add(_panelPreview);
+    }
+
+    private void MainForm_Resize(object? sender, EventArgs e)
+    {
+        _panelPreview.Width = ClientSize.Width - _panelPreview.Left - 12;
+        _panelPreview.Height = ClientSize.Height - _panelPreview.Top - 12;
     }
 
     private void DumpFormats()
