@@ -1,16 +1,11 @@
-using System;
-using System.Collections.Generic;
-using System.Drawing;
-using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using System.Text.Json;
-using System.Windows.Forms;
 using Vanara.PInvoke;
 using static Vanara.PInvoke.Ole32;
 
-namespace WinFormsApp4;
+namespace ClipboardOleDemo;
 
 internal static class Program
 {
@@ -36,6 +31,7 @@ public sealed class MainForm : Form
     private readonly Button _btnFormats;
     private readonly Button _btnRaw;
     private readonly Button _btnDrawable;
+    private readonly Button _btnCreateFromFile;
     private readonly Button _btnSave;
     private readonly Button _btnLoad;
     private readonly TextBox _txtInfo;
@@ -45,7 +41,7 @@ public sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "Vanara Clipboard OLE Persist Demo";
+        Text = "Vanara Clipboard/File OLE Persist Demo";
         Width = 1280;
         Height = 820;
         StartPosition = FormStartPosition.CenterScreen;
@@ -79,6 +75,16 @@ public sealed class MainForm : Form
             Height = 25
         };
         _btnDrawable.Click += (_, __) => CreateDrawableFromClipboard();
+
+        _btnCreateFromFile = new Button
+        {
+            Text = "从本地文件创建",
+            Left = 422,
+            Top = 12,
+            Width = 150,
+            Height = 25
+        };
+        _btnCreateFromFile.Click += (_, __) => CreateDrawableFromLocalFile();
 
         _btnSave = new Button
         {
@@ -124,23 +130,25 @@ public sealed class MainForm : Form
         _panelPreview.Paint += PanelPreview_Paint;
         _panelPreview.MouseDoubleClick += PanelPreview_DoubleClick;
 
-        this.Resize += MainForm_Resize;
-
         Controls.Add(_btnFormats);
         Controls.Add(_btnRaw);
         Controls.Add(_btnDrawable);
+        Controls.Add(_btnCreateFromFile);
         Controls.Add(_btnSave);
         Controls.Add(_btnLoad);
         Controls.Add(_txtInfo);
         Controls.Add(_panelPreview);
+        this.Resize += MainForm_Resize;
     }
 
     private void MainForm_Resize(object? sender, EventArgs e)
     {
-        _panelPreview.Width = ClientSize.Width - _panelPreview.Left - 12;
         _panelPreview.Height = ClientSize.Height - _panelPreview.Top - 12;
-    }
+        _panelPreview.Width = ClientSize.Width - _panelPreview.Left - 12;
+        _panelPreview.Invalidate();
 
+
+    }
     private void DumpFormats()
     {
         try
@@ -253,6 +261,47 @@ public sealed class MainForm : Form
         }
     }
 
+    private void CreateDrawableFromLocalFile()
+    {
+        try
+        {
+            using var dialog = new OpenFileDialog
+            {
+                Title = "选择本地文件并创建 OLE",
+                Filter = "All files (*.*)|*.*"
+            };
+
+            if (dialog.ShowDialog(this) != DialogResult.OK)
+                return;
+
+            _drawable?.Dispose();
+            _drawable = VanaraClipboardOle.CreateDrawableObjectFromFile(dialog.FileName, _panelPreview);
+
+            var sb = new StringBuilder();
+            sb.AppendLine("从本地文件创建成功");
+            sb.AppendLine(new string('-', 100));
+            sb.AppendLine($"FilePath        : {dialog.FileName}");
+            sb.AppendLine($"FileName        : {Path.GetFileName(dialog.FileName)}");
+            sb.AppendLine();
+
+            PersistedOlePackage package = _drawable.ExportPackage(Path.GetFileName(dialog.FileName));
+            sb.AppendLine($"StorageBytes    : {package.StorageBytes.Length}");
+            sb.AppendLine($"Version         : {package.Version}");
+            sb.AppendLine($"DisplayName     : {package.DisplayName}");
+            sb.AppendLine($"SavedAtUtc      : {package.SavedAtUtc:O}");
+            sb.AppendLine();
+            sb.AppendLine("双击右侧预览区打开原生编辑器。关闭编辑器后，如果 OLE Server 调用了 SaveObject，修改会保存回当前 OLE 存储。");
+            sb.AppendLine("注意：只有已注册 OLE Server 的文件类型（如 Excel/Word/PDF/Visio 等）才能正常创建；普通未知类型文件可能会失败。");
+
+            _txtInfo.Text = sb.ToString();
+            _panelPreview.Invalidate();
+        }
+        catch (Exception ex)
+        {
+            _txtInfo.Text = ex.ToString();
+        }
+    }
+
     private void SaveToFile()
     {
         try
@@ -305,7 +354,7 @@ public sealed class MainForm : Form
 
             _drawable?.Dispose();
             _drawable = VanaraClipboardOle.OpenFromPersistedPackage(package, _panelPreview);
-            ShowDrawableInfo($"已从文件恢复: {dialog.FileName}");
+            ShowDrawableInfo($"已从文件恢复: {dialog.FileName}", Path.GetFileName(dialog.FileName));
         }
         catch (Exception ex)
         {
@@ -313,12 +362,12 @@ public sealed class MainForm : Form
         }
     }
 
-    private void ShowDrawableInfo(string title)
+    private void ShowDrawableInfo(string title, string? displayName = null)
     {
         if (_drawable == null)
             return;
 
-        PersistedOlePackage package = _drawable.ExportPackage();
+        PersistedOlePackage package = _drawable.ExportPackage(displayName ?? "Clipboard OLE Object");
 
         var sb = new StringBuilder();
         sb.AppendLine(title);
@@ -381,7 +430,6 @@ public sealed class MainForm : Form
         Size? naturalSize = _drawable.GetNaturalPixelSize(e.Graphics.DpiX, e.Graphics.DpiY);
         if (naturalSize.HasValue)
         {
-            //drawRect = FitRectKeepAspect(naturalSize.Value, outerBox);
             drawRect.Width = naturalSize.Value.Width;
             drawRect.Height = naturalSize.Value.Height;
         }
@@ -391,23 +439,6 @@ public sealed class MainForm : Form
         }
 
         _drawable.Draw(e.Graphics, drawRect);
-    }
-
-    private static Rectangle FitRectKeepAspect(Size content, Rectangle box)
-    {
-        if (content.Width <= 0 || content.Height <= 0 || box.Width <= 0 || box.Height <= 0)
-            return box;
-
-        double scaleX = (double)box.Width / content.Width;
-        double scaleY = (double)box.Height / content.Height;
-        double scale = Math.Min(scaleX, scaleY);
-
-        int w = Math.Max(1, (int)Math.Round(content.Width * scale));
-        int h = Math.Max(1, (int)Math.Round(content.Height * scale));
-        int x = box.X + (box.Width - w) / 2;
-        int y = box.Y + (box.Height - h) / 2;
-
-        return new Rectangle(x, y, w, h);
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
@@ -667,10 +698,9 @@ public sealed class ClipboardDrawableOleObject : IDisposable
     {
         if (_oleObject == null)
             return;
-        if (_clientSite is null)
-            _clientSite = new OleClientSiteBridge(this);
-        if (_adviseSink is null)
-            _adviseSink = new OleAdviseSinkBridge(this);
+
+        _clientSite ??= new OleClientSiteBridge(this);
+        _adviseSink ??= new OleAdviseSinkBridge(this);
 
         if (_oleObject is IOleObject ole)
         {
@@ -706,16 +736,6 @@ public sealed class ClipboardDrawableOleObject : IDisposable
             _viewAdviseAttached = false;
         }
 
-        if (_adviseSink != null && Marshal.IsComObject(_adviseSink))
-        {
-            Marshal.ReleaseComObject(_adviseSink);
-            _adviseSink = null;
-        }
-        if (_clientSite != null && Marshal.IsComObject(_clientSite))
-        {
-            Marshal.ReleaseComObject(_clientSite);
-            _clientSite = null;
-        }
         if (_oleObject != null && Marshal.IsComObject(_oleObject))
         {
             if (_oleObject is IOleObject oleForClose)
@@ -739,6 +759,9 @@ public sealed class ClipboardDrawableOleObject : IDisposable
             Marshal.ReleaseComObject(_lockBytes);
             _lockBytes = null;
         }
+
+        _adviseSink = null;
+        _clientSite = null;
     }
 }
 
@@ -827,15 +850,23 @@ public sealed class OleAdviseSinkBridge : IAdviseSink
 public static class VanaraClipboardOle
 {
     private const int OLE_S_STATIC = 0x00040001;
-    private const uint GMEM_MOVEABLE = 0x0002;
-    private const uint GMEM_ZEROINIT = 0x0040;
-    private const uint GHND = GMEM_MOVEABLE | GMEM_ZEROINIT;
 
     private static readonly Guid IID_IUnknown =
         new("00000000-0000-0000-C000-000000000046");
 
     [DllImport("ole32.dll", CharSet = CharSet.Unicode)]
     private static extern int ProgIDFromCLSID(ref Guid clsid, out IntPtr lplpszProgID);
+
+    [DllImport("ole32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, EntryPoint = "OleCreateFromFile")]
+    private static extern int OleCreateFromFileNative(
+        [In] ref Guid rclsid,
+        [MarshalAs(UnmanagedType.LPWStr)] string lpszFileName,
+        [In] ref Guid riid,
+        OLERENDER renderopt,
+        [In] ref FORMATETC pFormatEtc,
+        [MarshalAs(UnmanagedType.Interface)] IOleClientSite? pClientSite,
+        [MarshalAs(UnmanagedType.Interface)] IStorage pStg,
+        [MarshalAs(UnmanagedType.Interface)] out object ppvObj);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct SIZEL_NATIVE
@@ -1016,6 +1047,72 @@ public static class VanaraClipboardOle
         finally
         {
             ReleaseComObjectSafe(dataObj);
+        }
+    }
+
+    public static ClipboardDrawableOleObject CreateDrawableObjectFromFile(string filePath, Control hostControl)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+            throw new ArgumentNullException(nameof(filePath));
+
+        if (!File.Exists(filePath))
+            throw new FileNotFoundException("文件不存在。", filePath);
+
+        if (hostControl == null)
+            throw new ArgumentNullException(nameof(hostControl));
+
+        CreateILockBytesOnHGlobal(IntPtr.Zero, true, out ILockBytes lockBytes).ThrowIfFailed();
+
+        IStorage? storage = null;
+        object? oleObj = null;
+
+        try
+        {
+            StgCreateDocfileOnILockBytes(
+                lockBytes,
+                STGM.STGM_CREATE | STGM.STGM_READWRITE | STGM.STGM_SHARE_EXCLUSIVE | STGM.STGM_TRANSACTED,
+                0,
+                out storage).ThrowIfFailed();
+
+            Guid clsid = Guid.Empty;
+            Guid iid = IID_IUnknown;
+
+            var renderFmt = new FORMATETC
+            {
+                cfFormat = 0,
+                ptd = IntPtr.Zero,
+                dwAspect = DVASPECT.DVASPECT_CONTENT,
+                lindex = -1,
+                tymed = TYMED.TYMED_NULL
+            };
+
+            HRESULT hr = (HRESULT)OleCreateFromFileNative(
+                ref clsid,
+                filePath,
+                ref iid,
+                OLERENDER.OLERENDER_DRAW,
+                ref renderFmt,
+                null,
+                storage,
+                out oleObj);
+
+            hr.ThrowIfFailed();
+
+            storage.Commit(0);
+            return new ClipboardDrawableOleObject(oleObj, storage, lockBytes, hostControl);
+        }
+        catch
+        {
+            if (oleObj != null && Marshal.IsComObject(oleObj))
+                Marshal.ReleaseComObject(oleObj);
+
+            if (storage != null && Marshal.IsComObject(storage))
+                Marshal.ReleaseComObject(storage);
+
+            if (lockBytes != null && Marshal.IsComObject(lockBytes))
+                Marshal.ReleaseComObject(lockBytes);
+
+            throw;
         }
     }
 
