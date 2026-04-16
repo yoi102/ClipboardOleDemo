@@ -34,6 +34,7 @@ public sealed class MainForm : Form
     private readonly Button _btnCreateFromFile;
     private readonly Button _btnSave;
     private readonly Button _btnLoad;
+    private readonly CheckBox _chkFileAsIcon;
     private readonly TextBox _txtInfo;
     private readonly Panel _panelPreview;
 
@@ -106,6 +107,16 @@ public sealed class MainForm : Form
         };
         _btnLoad.Click += (_, __) => LoadFromFile();
 
+        _chkFileAsIcon = new CheckBox
+        {
+            Text = "文件以图标方式插入 (as icon)",
+            Left = 272,
+            Top = 42,
+            Width = 220,
+            Height = 24,
+            Checked = false
+        };
+
         _txtInfo = new TextBox
         {
             Left = 12,
@@ -136,9 +147,11 @@ public sealed class MainForm : Form
         Controls.Add(_btnCreateFromFile);
         Controls.Add(_btnSave);
         Controls.Add(_btnLoad);
+        Controls.Add(_chkFileAsIcon);
         Controls.Add(_txtInfo);
         Controls.Add(_panelPreview);
-        this.Resize += MainForm_Resize;
+
+        Resize += MainForm_Resize;
     }
 
     private void MainForm_Resize(object? sender, EventArgs e)
@@ -146,9 +159,8 @@ public sealed class MainForm : Form
         _panelPreview.Height = ClientSize.Height - _panelPreview.Top - 12;
         _panelPreview.Width = ClientSize.Width - _panelPreview.Left - 12;
         _panelPreview.Invalidate();
-
-
     }
+
     private void DumpFormats()
     {
         try
@@ -231,6 +243,8 @@ public sealed class MainForm : Form
                 return;
             }
 
+            _chkFileAsIcon.Checked = false;
+
             sb.AppendLine("从剪切板创建成功");
             sb.AppendLine(new string('-', 100));
 
@@ -248,6 +262,7 @@ public sealed class MainForm : Form
             sb.AppendLine($"StorageBytes    : {package.StorageBytes.Length}");
             sb.AppendLine($"Version         : {package.Version}");
             sb.AppendLine($"DisplayName     : {package.DisplayName}");
+            sb.AppendLine($"DrawAspect      : {(DVASPECT)package.DrawAspect}");
             sb.AppendLine($"SavedAtUtc      : {package.SavedAtUtc:O}");
             sb.AppendLine();
             sb.AppendLine("双击右侧预览区打开原生编辑器。关闭编辑器后，如果 OLE Server 调用了 SaveObject，修改会保存回当前 OLE 存储。再次双击应打开最新内容。保存到文件后，可在后续会话中重新恢复。");
@@ -274,20 +289,27 @@ public sealed class MainForm : Form
             if (dialog.ShowDialog(this) != DialogResult.OK)
                 return;
 
+            bool asIcon = _chkFileAsIcon.Checked;
+
             _drawable?.Dispose();
-            _drawable = VanaraClipboardOle.CreateDrawableObjectFromFile(dialog.FileName, _panelPreview);
+            _drawable = VanaraClipboardOle.CreateDrawableObjectFromFile(
+                dialog.FileName,
+                _panelPreview,
+                asIcon);
 
             var sb = new StringBuilder();
             sb.AppendLine("从本地文件创建成功");
             sb.AppendLine(new string('-', 100));
             sb.AppendLine($"FilePath        : {dialog.FileName}");
             sb.AppendLine($"FileName        : {Path.GetFileName(dialog.FileName)}");
+            sb.AppendLine($"AsIcon          : {asIcon}");
             sb.AppendLine();
 
             PersistedOlePackage package = _drawable.ExportPackage(Path.GetFileName(dialog.FileName));
             sb.AppendLine($"StorageBytes    : {package.StorageBytes.Length}");
             sb.AppendLine($"Version         : {package.Version}");
             sb.AppendLine($"DisplayName     : {package.DisplayName}");
+            sb.AppendLine($"DrawAspect      : {(DVASPECT)package.DrawAspect}");
             sb.AppendLine($"SavedAtUtc      : {package.SavedAtUtc:O}");
             sb.AppendLine();
             sb.AppendLine("双击右侧预览区打开原生编辑器。关闭编辑器后，如果 OLE Server 调用了 SaveObject，修改会保存回当前 OLE 存储。");
@@ -323,7 +345,7 @@ public sealed class MainForm : Form
                 return;
 
             PersistedOlePackage package = _drawable.ExportPackage();
-            string json = JsonSerializer.Serialize(package);
+            string json = JsonSerializer.Serialize(package, VanaraClipboardOle.JsonOptions);
             File.WriteAllText(dialog.FileName, json, Encoding.UTF8);
 
             ShowDrawableInfo($"已保存到文件: {dialog.FileName}");
@@ -354,6 +376,9 @@ public sealed class MainForm : Form
 
             _drawable?.Dispose();
             _drawable = VanaraClipboardOle.OpenFromPersistedPackage(package, _panelPreview);
+
+            _chkFileAsIcon.Checked = package.DrawAspect == (uint)DVASPECT.DVASPECT_ICON;
+
             ShowDrawableInfo($"已从文件恢复: {dialog.FileName}", Path.GetFileName(dialog.FileName));
         }
         catch (Exception ex)
@@ -375,6 +400,7 @@ public sealed class MainForm : Form
         sb.AppendLine($"StorageBytes    : {package.StorageBytes.Length}");
         sb.AppendLine($"Version         : {package.Version}");
         sb.AppendLine($"DisplayName     : {package.DisplayName}");
+        sb.AppendLine($"DrawAspect      : {(DVASPECT)package.DrawAspect}");
         sb.AppendLine($"SavedAtUtc      : {package.SavedAtUtc:O}");
         sb.AppendLine();
         sb.AppendLine("双击右侧预览区打开原生编辑器。关闭编辑器后，如果 OLE Server 调用了 SaveObject，修改会保存回当前 OLE 存储。再次双击应打开最新内容。保存到文件后，可在后续会话中重新恢复。");
@@ -423,22 +449,35 @@ public sealed class MainForm : Form
         var outerBox = new Rectangle(
             20,
             20,
-            _panelPreview.ClientSize.Width - 40,
-            _panelPreview.ClientSize.Height - 40);
+            Math.Max(1, _panelPreview.ClientSize.Width - 40),
+            Math.Max(1, _panelPreview.ClientSize.Height - 40));
 
         Rectangle drawRect = outerBox;
         Size? naturalSize = _drawable.GetNaturalPixelSize(e.Graphics.DpiX, e.Graphics.DpiY);
         if (naturalSize.HasValue)
         {
-            drawRect.Width = naturalSize.Value.Width;
-            drawRect.Height = naturalSize.Value.Height;
-        }
-        else
-        {
-            return;
+            drawRect = GetBestDrawRect(outerBox, naturalSize.Value);
         }
 
         _drawable.Draw(e.Graphics, drawRect);
+    }
+
+    private static Rectangle GetBestDrawRect(Rectangle outerBox, Size naturalSize)
+    {
+        if (naturalSize.Width <= 0 || naturalSize.Height <= 0)
+            return outerBox;
+
+        double scaleX = (double)outerBox.Width / naturalSize.Width;
+        double scaleY = (double)outerBox.Height / naturalSize.Height;
+        double scale = Math.Min(1.0, Math.Min(scaleX, scaleY));
+
+        int w = Math.Max(1, (int)Math.Round(naturalSize.Width * scale));
+        int h = Math.Max(1, (int)Math.Round(naturalSize.Height * scale));
+
+        int x = outerBox.Left + (outerBox.Width - w) / 2;
+        int y = outerBox.Top + (outerBox.Height - h) / 2;
+
+        return new Rectangle(x, y, w, h);
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
@@ -486,6 +525,7 @@ public sealed class PersistedOlePackage
     public int Version { get; init; } = 1;
     public string DisplayName { get; init; } = "Clipboard OLE Object";
     public DateTime SavedAtUtc { get; init; } = DateTime.UtcNow;
+    public uint DrawAspect { get; init; } = (uint)DVASPECT.DVASPECT_CONTENT;
     public byte[] StorageBytes { get; init; } = Array.Empty<byte>();
 }
 
@@ -495,6 +535,7 @@ public sealed class ClipboardDrawableOleObject : IDisposable
     private IStorage? _storage;
     private ILockBytes? _lockBytes;
     private readonly Control _hostControl;
+    private readonly DVASPECT _drawAspect;
 
     private OleClientSiteBridge? _clientSite;
     private OleAdviseSinkBridge? _adviseSink;
@@ -506,12 +547,18 @@ public sealed class ClipboardDrawableOleObject : IDisposable
     private const int OLEIVERB_SHOW = -1;
     private const int OLEIVERB_OPEN = -2;
 
-    internal ClipboardDrawableOleObject(object oleObject, IStorage storage, ILockBytes lockBytes, Control hostControl)
+    internal ClipboardDrawableOleObject(
+        object oleObject,
+        IStorage storage,
+        ILockBytes lockBytes,
+        Control hostControl,
+        DVASPECT drawAspect)
     {
         _oleObject = oleObject;
         _storage = storage;
         _lockBytes = lockBytes;
         _hostControl = hostControl ?? throw new ArgumentNullException(nameof(hostControl));
+        _drawAspect = drawAspect;
 
         AttachCallbacks();
     }
@@ -525,6 +572,7 @@ public sealed class ClipboardDrawableOleObject : IDisposable
             Version = 1,
             DisplayName = displayName,
             SavedAtUtc = DateTime.UtcNow,
+            DrawAspect = (uint)_drawAspect,
             StorageBytes = GetBackingStorageBytes()
         };
     }
@@ -586,7 +634,7 @@ public sealed class ClipboardDrawableOleObject : IDisposable
         if (_oleObject is not IOleObject ole)
             return null;
 
-        HRESULT hr = ole.GetExtent(DVASPECT.DVASPECT_CONTENT, out SIZE sz);
+        HRESULT hr = ole.GetExtent(_drawAspect, out SIZE sz);
         if (hr != 0 || sz.cx <= 0 || sz.cy <= 0)
             return null;
 
@@ -602,13 +650,14 @@ public sealed class ClipboardDrawableOleObject : IDisposable
     public void Draw(Graphics g, Rectangle bounds)
     {
         if (_oleObject == null)
-            throw new ObjectDisposedException(nameof(ClipboardDrawableOleObject));
+            //throw new ObjectDisposedException(nameof(ClipboardDrawableOleObject));
+            return;
 
         IntPtr hdc = g.GetHdc();
         try
         {
             var rc = new RECT(bounds.Left, bounds.Top, bounds.Right, bounds.Bottom);
-            OleDraw(_oleObject, DVASPECT.DVASPECT_CONTENT, hdc, rc).ThrowIfFailed();
+            OleDraw(_oleObject, _drawAspect, hdc, rc).ThrowIfFailed();
         }
         finally
         {
@@ -714,7 +763,7 @@ public sealed class ClipboardDrawableOleObject : IDisposable
         if (_oleObject is IViewObject view)
         {
             HRESULT hr = view.SetAdvise(
-                DVASPECT.DVASPECT_CONTENT,
+                _drawAspect,
                 ADVF.ADVF_PRIMEFIRST,
                 _adviseSink);
 
@@ -732,7 +781,7 @@ public sealed class ClipboardDrawableOleObject : IDisposable
 
         if (_oleObject is IViewObject view && _viewAdviseAttached)
         {
-            try { view.SetAdvise(DVASPECT.DVASPECT_CONTENT, 0, null); } catch { }
+            try { view.SetAdvise(_drawAspect, 0, null); } catch { }
             _viewAdviseAttached = false;
         }
 
@@ -850,6 +899,7 @@ public sealed class OleAdviseSinkBridge : IAdviseSink
 public static class VanaraClipboardOle
 {
     private const int OLE_S_STATIC = 0x00040001;
+    private const short CF_METAFILEPICT = 3;
 
     private static readonly Guid IID_IUnknown =
         new("00000000-0000-0000-C000-000000000046");
@@ -1028,7 +1078,12 @@ public static class VanaraClipboardOle
                     out oleObj).ThrowIfFailed();
 
                 storage.Commit(0);
-                return new ClipboardDrawableOleObject(oleObj, storage, lockBytes, hostControl);
+                return new ClipboardDrawableOleObject(
+                    oleObj,
+                    storage,
+                    lockBytes,
+                    hostControl,
+                    DVASPECT.DVASPECT_CONTENT);
             }
             catch
             {
@@ -1050,7 +1105,10 @@ public static class VanaraClipboardOle
         }
     }
 
-    public static ClipboardDrawableOleObject CreateDrawableObjectFromFile(string filePath, Control hostControl)
+    public static ClipboardDrawableOleObject CreateDrawableObjectFromFile(
+        string filePath,
+        Control hostControl,
+        bool asIcon = false)
     {
         if (string.IsNullOrWhiteSpace(filePath))
             throw new ArgumentNullException(nameof(filePath));
@@ -1077,20 +1135,28 @@ public static class VanaraClipboardOle
             Guid clsid = Guid.Empty;
             Guid iid = IID_IUnknown;
 
+            DVASPECT drawAspect = asIcon
+                ? DVASPECT.DVASPECT_ICON
+                : DVASPECT.DVASPECT_CONTENT;
+
+            OLERENDER renderOpt = asIcon
+                ? OLERENDER.OLERENDER_FORMAT
+                : OLERENDER.OLERENDER_DRAW;
+
             var renderFmt = new FORMATETC
             {
-                cfFormat = 0,
+                cfFormat = asIcon ? CF_METAFILEPICT : (short)0,
                 ptd = IntPtr.Zero,
-                dwAspect = DVASPECT.DVASPECT_CONTENT,
+                dwAspect = drawAspect,
                 lindex = -1,
-                tymed = TYMED.TYMED_NULL
+                tymed = asIcon ? TYMED.TYMED_MFPICT : TYMED.TYMED_NULL
             };
 
             HRESULT hr = (HRESULT)OleCreateFromFileNative(
                 ref clsid,
                 filePath,
                 ref iid,
-                OLERENDER.OLERENDER_DRAW,
+                renderOpt,
                 ref renderFmt,
                 null,
                 storage,
@@ -1099,7 +1165,13 @@ public static class VanaraClipboardOle
             hr.ThrowIfFailed();
 
             storage.Commit(0);
-            return new ClipboardDrawableOleObject(oleObj, storage, lockBytes, hostControl);
+
+            return new ClipboardDrawableOleObject(
+                oleObj,
+                storage,
+                lockBytes,
+                hostControl,
+                drawAspect);
         }
         catch
         {
@@ -1151,7 +1223,16 @@ public static class VanaraClipboardOle
                 null,
                 out oleObj).ThrowIfFailed();
 
-            return new ClipboardDrawableOleObject(oleObj, storage, lockBytes, hostControl);
+            DVASPECT drawAspect = package.DrawAspect == (uint)DVASPECT.DVASPECT_ICON
+                ? DVASPECT.DVASPECT_ICON
+                : DVASPECT.DVASPECT_CONTENT;
+
+            return new ClipboardDrawableOleObject(
+                oleObj,
+                storage,
+                lockBytes,
+                hostControl,
+                drawAspect);
         }
         catch
         {
@@ -1421,7 +1502,7 @@ public static class VanaraClipboardOle
             if (!char.IsControl(ch))
                 score += 2;
 
-            if (char.IsLetterOrDigit(ch) || char.IsWhiteSpace(ch) || ch is '.' or '\\' or ':' or '_' or '-' or '(' or ')' or '/')
+            if (char.IsLetterOrDigit(ch) || char.IsWhiteSpace(ch) || ch == '.' || ch == '\\' || ch == ':' || ch == '_' || ch == '-' || ch == '(' || ch == ')' || ch == '/')
                 score += 2;
 
             if (ch == '\uFFFD')
