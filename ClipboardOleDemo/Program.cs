@@ -40,6 +40,17 @@ public sealed class MainForm : Form
 
     private ClipboardDrawableOleObject? _drawable;
 
+    private float _previewZoom = 1.0f;
+    private PointF _previewPan = new PointF(0, 0);
+
+    private bool _previewDragging;
+    private Point _previewDragStartMouse;
+    private PointF _previewDragStartPan;
+
+    private const float PreviewZoomMin = 0.10f;
+    private const float PreviewZoomMax = 16.0f;
+    private const float PreviewZoomStep = 1.15f;
+
     public MainForm()
     {
         Text = "Vanara Clipboard/File OLE Persist Demo";
@@ -138,8 +149,14 @@ public sealed class MainForm : Form
             BorderStyle = BorderStyle.FixedSingle,
             BackColor = Color.White
         };
+        _panelPreview.TabStop = true;
         _panelPreview.Paint += PanelPreview_Paint;
         _panelPreview.MouseDoubleClick += PanelPreview_DoubleClick;
+        _panelPreview.MouseDown += PanelPreview_MouseDown;
+        _panelPreview.MouseMove += PanelPreview_MouseMove;
+        _panelPreview.MouseUp += PanelPreview_MouseUp;
+        _panelPreview.MouseWheel += PanelPreview_MouseWheel;
+        _panelPreview.MouseEnter += PanelPreview_MouseEnter;
 
         Controls.Add(_btnFormats);
         Controls.Add(_btnRaw);
@@ -224,6 +241,7 @@ public sealed class MainForm : Form
 
             _drawable?.Dispose();
             _drawable = VanaraClipboardOle.CreateDrawableObjectFromClipboard(_panelPreview);
+            //ResetPreviewView();
 
             var sb = new StringBuilder();
 
@@ -296,6 +314,7 @@ public sealed class MainForm : Form
                 dialog.FileName,
                 _panelPreview,
                 asIcon);
+            //ResetPreviewView();
 
             var sb = new StringBuilder();
             sb.AppendLine("从本地文件创建成功");
@@ -376,6 +395,7 @@ public sealed class MainForm : Form
 
             _drawable?.Dispose();
             _drawable = VanaraClipboardOle.OpenFromPersistedPackage(package, _panelPreview);
+            //ResetPreviewView();
 
             _chkFileAsIcon.Checked = package.DrawAspect == (uint)DVASPECT.DVASPECT_ICON;
 
@@ -414,6 +434,9 @@ public sealed class MainForm : Form
         if (_drawable == null)
             return;
 
+        if (_previewDragging)
+            return;
+
         try
         {
             _drawable.OpenEditor(
@@ -426,25 +449,60 @@ public sealed class MainForm : Form
             _txtInfo.Text = ex.ToString();
         }
     }
-
-    private void PanelPreview_Paint(object? sender, PaintEventArgs e)
+    private void PanelPreview_MouseEnter(object? sender, EventArgs e)
     {
-        e.Graphics.Clear(Color.White);
+        if (!_panelPreview.Focused)
+            _panelPreview.Focus();
+    }
 
+    private void PanelPreview_MouseDown(object? sender, MouseEventArgs e)
+    {
         if (_drawable == null)
-        {
-            using var pen = new Pen(Color.Silver);
-            e.Graphics.DrawRectangle(
-                pen,
-                10,
-                10,
-                _panelPreview.ClientSize.Width - 20,
-                _panelPreview.ClientSize.Height - 20);
-
-            using var brush = new SolidBrush(Color.Gray);
-            e.Graphics.DrawString("这里显示 OleDraw 结果", Font, brush, 20, 20);
             return;
+
+        _panelPreview.Focus();
+
+        if (e.Button == MouseButtons.Left)
+        {
+            _previewDragging = true;
+            _previewDragStartMouse = e.Location;
+            _previewDragStartPan = _previewPan;
+            _panelPreview.Cursor = Cursors.SizeAll;
         }
+        else if (e.Button == MouseButtons.Middle)
+        {
+            //ResetPreviewView();
+        }
+    }
+
+    private void PanelPreview_MouseMove(object? sender, MouseEventArgs e)
+    {
+        if (!_previewDragging)
+            return;
+
+        float dx = e.X - _previewDragStartMouse.X;
+        float dy = e.Y - _previewDragStartMouse.Y;
+
+        _previewPan = new PointF(
+            _previewDragStartPan.X + dx,
+            _previewDragStartPan.Y + dy);
+
+        _panelPreview.Invalidate();
+    }
+
+    private void PanelPreview_MouseUp(object? sender, MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left)
+        {
+            _previewDragging = false;
+            _panelPreview.Cursor = Cursors.Default;
+        }
+    }
+
+    private void PanelPreview_MouseWheel(object? sender, MouseEventArgs e)
+    {
+        if (_drawable == null)
+            return;
 
         var outerBox = new Rectangle(
             20,
@@ -452,14 +510,106 @@ public sealed class MainForm : Form
             Math.Max(1, _panelPreview.ClientSize.Width - 40),
             Math.Max(1, _panelPreview.ClientSize.Height - 40));
 
-        Rectangle drawRect = outerBox;
-        Size? naturalSize = _drawable.GetNaturalPixelSize(e.Graphics.DpiX, e.Graphics.DpiY);
-        if (naturalSize.HasValue)
+        Size naturalSize = GetPreviewNaturalSize(outerBox, CreateGraphics().DpiX, CreateGraphics().DpiY);
+
+        RectangleF oldRect = GetPreviewDrawRect(outerBox, naturalSize);
+
+        float oldZoom = _previewZoom;
+        float newZoom = e.Delta > 0
+            ? oldZoom * PreviewZoomStep
+            : oldZoom / PreviewZoomStep;
+
+        newZoom = Math.Max(PreviewZoomMin, Math.Min(PreviewZoomMax, newZoom));
+
+        if (Math.Abs(newZoom - oldZoom) < 0.0001f)
+            return;
+
+        float rx = oldRect.Width > 0 ? (e.X - oldRect.Left) / oldRect.Width : 0.5f;
+        float ry = oldRect.Height > 0 ? (e.Y - oldRect.Top) / oldRect.Height : 0.5f;
+
+        _previewZoom = newZoom;
+
+        RectangleF newRect = GetPreviewDrawRect(outerBox, naturalSize);
+
+        float newLeft = e.X - rx * newRect.Width;
+        float newTop = e.Y - ry * newRect.Height;
+
+        float outerCenterX = outerBox.Left + outerBox.Width / 2f;
+        float outerCenterY = outerBox.Top + outerBox.Height / 2f;
+
+        _previewPan = new PointF(
+            newLeft + newRect.Width / 2f - outerCenterX,
+            newTop + newRect.Height / 2f - outerCenterY);
+
+        _panelPreview.Invalidate();
+    }
+    private Size GetPreviewNaturalSize(Rectangle outerBox, float dpiX, float dpiY)
+    {
+        if (_drawable == null)
+            return new Size(Math.Max(1, outerBox.Width), Math.Max(1, outerBox.Height));
+
+        Size? naturalSize = _drawable.GetNaturalPixelSize(dpiX, dpiY);
+        if (naturalSize.HasValue && naturalSize.Value.Width > 0 && naturalSize.Value.Height > 0)
+            return naturalSize.Value;
+
+        return new Size(Math.Max(1, outerBox.Width), Math.Max(1, outerBox.Height));
+    }
+
+    private RectangleF GetPreviewDrawRect(Rectangle outerBox, Size naturalSize)
+    {
+        Rectangle baseRect = GetBestDrawRect(outerBox, naturalSize);
+
+        float outerCenterX = outerBox.Left + outerBox.Width / 2f;
+        float outerCenterY = outerBox.Top + outerBox.Height / 2f;
+
+        float w = Math.Max(1f, baseRect.Width * _previewZoom);
+        float h = Math.Max(1f, baseRect.Height * _previewZoom);
+
+        float cx = outerCenterX + _previewPan.X;
+        float cy = outerCenterY + _previewPan.Y;
+
+        return new RectangleF(
+            cx - w / 2f,
+            cy - h / 2f,
+            w,
+            h);
+    }
+    private void PanelPreview_Paint(object? sender, PaintEventArgs e)
+    {
+        e.Graphics.Clear(Color.White);
+
+        var outerBox = new Rectangle(
+            20,
+            20,
+            Math.Max(1, _panelPreview.ClientSize.Width - 40),
+            Math.Max(1, _panelPreview.ClientSize.Height - 40));
+
+        using (var pen = new Pen(Color.Silver))
         {
-            drawRect = GetBestDrawRect(outerBox, naturalSize.Value);
+            e.Graphics.DrawRectangle(pen, outerBox);
         }
 
+        if (_drawable == null)
+        {
+            using var brush = new SolidBrush(Color.Gray);
+            e.Graphics.DrawString("这里显示 OleDraw 结果", Font, brush, 20, 20);
+            return;
+        }
+
+        Size naturalSize = GetPreviewNaturalSize(outerBox, e.Graphics.DpiX, e.Graphics.DpiY);
+        RectangleF drawRectF = GetPreviewDrawRect(outerBox, naturalSize);
+
+        Rectangle drawRect = Rectangle.FromLTRB(
+            (int)Math.Round(drawRectF.Left),
+            (int)Math.Round(drawRectF.Top),
+            (int)Math.Round(drawRectF.Right),
+            (int)Math.Round(drawRectF.Bottom));
+
         _drawable.Draw(e.Graphics, drawRect);
+
+        using var infoBrush = new SolidBrush(Color.DimGray);
+        string tip = $"Zoom: {_previewZoom:0.00}x   Pan: ({_previewPan.X:0},{_previewPan.Y:0})   滚轮缩放 / 左键拖拽 / 中键复位 / 双击编辑";
+        e.Graphics.DrawString(tip, Font, infoBrush, outerBox.Left, 4);
     }
 
     private static Rectangle GetBestDrawRect(Rectangle outerBox, Size naturalSize)
@@ -1220,7 +1370,7 @@ public static class VanaraClipboardOle
             OleLoad(
                 storage,
                 in IID_IUnknown,
-                null,
+                null!,
                 out oleObj).ThrowIfFailed();
 
             DVASPECT drawAspect = package.DrawAspect == (uint)DVASPECT.DVASPECT_ICON
